@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+{% block title %}水陆调查 · {{ run.version_seq and ("#" ~ run.version_seq) or run.version_id }}{% endblock %}
+{% block head_extra %}
+<style>
+  .result { display: flex; flex-wrap: wrap; gap: 10px 22px; margin: 4px 0 10px; }
+  .result .big { font-size: 26px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .result .big.lower { color: var(--warn); }
+  .result .big.upper { color: var(--accent); }
+  .result .label { display: block; font-size: 12px; color: var(--muted); }
+  .meta { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12.5px; color: var(--muted); }
+  .meta b { color: var(--text); font-variant-numeric: tabular-nums; }
+  .inline-form { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; }
+  .inline-form label.field { margin-bottom: 0; flex: 1 1 110px; }
+  .inline-form button { height: 37px; }
+  textarea { width: 100%; min-height: 96px; background: var(--panel-2); color: var(--text);
+             border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px;
+             font: 12.5px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12.5px; color: var(--muted); margin-top: 6px; }
+  .legend i { display: inline-block; width: 11px; height: 11px; border-radius: 3px; margin-right: 5px;
+              vertical-align: -1px; border: 1px solid var(--line); }
+</style>
+{% endblock %}
+{% block content %}
+<div class="col">
+  {% if flash %}<div class="flash ok">{{ flash }}</div>{% endif %}
+  {% if flash_error %}<div class="flash err">{{ flash_error }}</div>{% endif %}
+  {% if run_error %}<div class="flash err">{{ run_error }}</div>{% endif %}
+
+  <section class="card">
+    <h2>
+      水面面积范围
+      <span class="hint">四邻接 · 仅经已知水面可达 / 将未知也当水面</span>
+      <span class="spacer"></span>
+      <a href="/" class="small muted">← 返回画幅合成</a>
+    </h2>
+    <div class="meta">
+      <span>画幅：<b>{% if run.version_seq is not none %}#{{ run.version_seq }}{% else %}{{ run.version_id }}{% endif %}</b>
+        （{{ run.canvas_width }}×{{ run.canvas_height }}）</span>
+      <span>区块：<b>{{ (run.canvas_width + 127) // 128 }}×{{ (run.canvas_height + 127) // 128 }}</b> 个 128×128</span>
+      <span>水面 <b>{{ run.water_pixels }}</b> · 陆地 <b>{{ run.land_pixels }}</b> · 未知 <b>{{ run.unknown_pixels }}</b></span>
+      <span>补测批次 <b>{{ patch_total }}</b></span>
+      <span>数据指纹 <b class="mono">{{ fingerprint[:16] }}</b></span>
+    </div>
+
+    <form method="get" action="/analysis/{{ run.id }}/query" class="inline-form" style="margin-top:14px">
+      <label class="field"><span>已知水面像元 · 列 (x)</span>
+        <input type="number" name="col" min="0" max="{{ run.canvas_width - 1 }}" required
+               value="{{ query.col if query else '' }}">
+      </label>
+      <label class="field"><span>行 (y)</span>
+        <input type="number" name="row" min="0" max="{{ run.canvas_height - 1 }}" required
+               value="{{ query.row if query else '' }}">
+      </label>
+      <button type="submit" class="primary">计算面积范围</button>
+    </form>
+    <p class="small muted" style="margin:8px 0 0">
+      坐标从 0 起算；种子像元必须是已知水面（掩膜为白且该处已发布画幅不透明）。
+      查询只读取 128×128 区块的连通摘要，不重算全图。
+    </p>
+
+    {% if query_error %}
+      <div class="flash err" style="margin:14px 0 0">{{ query_error }}</div>
+    {% endif %}
+
+    {% if query_result %}
+    <div class="result" style="margin-top:16px">
+      <div>
+        <span class="label">下限（只经已知水面）</span>
+        <span class="big lower">{{ query_result.lower }}</span>
+        <span class="small muted">像元</span>
+      </div>
+      <div>
+        <span class="label">上限（未知也视为水面）</span>
+        <span class="big upper">{{ query_result.upper }}</span>
+        <span class="small muted">像元</span>
+      </div>
+      <div>
+        <span class="label">云层可能藏起的面积</span>
+        <b class="big">{{ query_result.uncertain }}</b>
+        <span class="small muted">像元</span>
+      </div>
+    </div>
+    <div class="meta">
+      <span>种子 ({{ query.col }}, {{ query.row }})</span>
+      <span>下限触及区块 <b>{{ query_result.lower_components }}</b></span>
+      <span>上限触及区块 <b>{{ query_result.upper_components }}</b></span>
+      <span>本次读取区块 <b>{{ query_result.blocks_visited }}</b></span>
+    </div>
+    <div class="legend">
+      <span><i style="background:#6cc3f0"></i>已知水面</span>
+      <span><i style="background:#1f2c37"></i>陆地</span>
+      <span><i style="background:#93a4b3"></i>未知（画幅透明处）</span>
+    </div>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <h2>现场补测 <span class="hint">CSV：列,行,状态（water/水/1 或 land/陆/0）</span></h2>
+    <form method="post" action="/analysis/{{ run.id }}/patch" enctype="multipart/form-data">
+      <label class="field"><span>补测 CSV（UTF-8，可含表头 col,row,state）</span>
+        <input type="file" name="csv_file" accept=".csv,text/csv" required>
+      </label>
+      <div class="actions">
+        <button type="submit" class="primary">应用补测并重算改动区块</button>
+        <span class="small muted">只重算实际被改判的 128×128 区块；改判与摘要同一事务生效，失败则保持原结果。</span>
+      </div>
+    </form>
+    <details>
+      <summary>CSV 示例</summary>
+      <pre class="small mono" style="white-space:pre-wrap;color:var(--muted)">col,row,state
+130,64,water
+131,64,water
+130,65,land</pre>
+    </details>
+
+    {% if patches %}
+    <table style="margin-top:12px">
+      <thead><tr><th>批次</th><th>时间</th><th class="num">行</th><th class="num">变化像元</th><th class="num">区块</th><th class="mono">CSV SHA-256</th></tr></thead>
+      <tbody>
+      {% for p in patches %}
+        <tr>
+          <td class="mono">{{ p.id[:8] }}</td>
+          <td class="small muted">{{ p.created_at }}</td>
+          <td class="num">{{ p.row_count }}</td>
+          <td class="num">{{ p.changed_pixels }}</td>
+          <td class="num">{{ p.changed_blocks.split(',')|length if p.changed_blocks else 0 }}</td>
+          <td class="mono">{{ p.csv_sha256[:16] }}…</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+      <p class="small muted" style="margin:12px 0 0">尚未应用补测。</p>
+    {% endif %}
+  </section>
+</div>
+
+<div class="col">
+  <section class="card">
+    <h2>已发布画幅</h2>
+    <div class="preview-wrap">
+      <img src="/download/{{ run.version_id }}/mosaic.png" alt="已发布画幅">
+    </div>
+    <p class="small muted" style="margin:10px 0 0">
+      画幅透明处表示无云来源，按题意先记为未知；可用下方下载核对掩膜与版本。
+    </p>
+    <div class="downloads">
+      <a href="/download/{{ run.version_id }}/mosaic.png">下载画幅 PNG</a>
+      <a href="/download/{{ run.version_id }}/manifest.json">版本清单</a>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>规则</h2>
+    <ul class="rules">
+      <li>黑色 = 陆地，白色 = 水面；原画幅透明处一律记为<b>未知</b>。</li>
+      <li>下限：从种子出发，只经过<b>已知水面</b>、四邻接可达的像元数。</li>
+      <li>上限：把<b>未知也当成水</b>后重新计数（云可能遮住陆桥）。</li>
+      <li>按 128×128 分块维护连通摘要；查询只读摘要，结果与全图重算一致。</li>
+      <li>补测 CSV 按列、行改判水陆；只重算改动块内部连通关系，并整体提交。</li>
+    </ul>
+  </section>
+</div>
+{% endblock %}

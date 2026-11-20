@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}航拍无云画幅合成{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  {% block head_extra %}{% endblock %}
+</head>
+<body>
+  <header class="top">
+    <h1>{% block heading %}航拍无云画幅合成{% endblock %}</h1>
+    <span class="sub">{% block subtitle %}按瓦片号去重取最新修订 · 云遮蔽像素透明 · 逐像素来源可追溯{% endblock %}</span>
+  </header>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

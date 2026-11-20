@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}新建水陆调查 · 航拍无云画幅合成{% endblock %}
+{% block heading %}新建水陆调查{% endblock %}
+{% block subtitle %}选一版已发布画幅 · 上传同尺寸黑白 PNG · 建立 128×128 连通摘要{% endblock %}
+{% block content %}
+<div class="col">
+  {% if flash_error %}<div class="flash err">{{ flash_error }}</div>{% endif %}
+  {% if run_error %}<div class="flash err">{{ run_error }}</div>{% endif %}
+
+  <section class="card">
+    <h2>1. 选择已发布画幅</h2>
+    {% if recent_versions %}
+      <table>
+        <thead><tr><th></th><th>#</th><th>时间</th><th class="num">尺寸</th><th class="num">瓦片</th></tr></thead>
+        <tbody>
+        {% for v in recent_versions %}
+          <tr class="{{ '' if selected and selected.id == v.id else 'inactive' }}">
+            <td>
+              <a href="/analysis/new?version={{ v.id }}" class="pick">选此版本</a>
+            </td>
+            <td>{{ v.seq }}</td>
+            <td class="small muted">{{ v.created_at }}</td>
+            <td class="num">{{ v.width }}×{{ v.height }}</td>
+            <td class="num">{{ v.tile_count }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      <p class="small muted" style="margin:10px 0 0">
+        选中的版本会与下方掩膜一起提交；同一版本 + 同一掩膜重复提交会复用已有调查。
+      </p>
+    {% else %}
+      <p class="muted small">还没有已发布版本。请先回到 <a href="/">首页</a> 发布一个画幅。</p>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <h2>2. 上传黑白水陆掩膜</h2>
+    <form method="post" action="/analysis" enctype="multipart/form-data">
+      <input type="hidden" name="version_id" value="{{ selected.id if selected else '' }}">
+      <label class="field"><span>水陆掩膜（PNG，与画幅同尺寸；黑色 = 陆地，白色 = 水面）</span>
+        <input type="file" name="mask" accept="image/png" required>
+      </label>
+      <p class="small muted" style="margin:0 0 10px">
+        已发布画幅中透明（无云来源）的像元一律记为<b>未知</b>，不受掩膜影响。
+      </p>
+      <div class="actions">
+        <button type="submit" class="primary">建立调查</button>
+        {% if selected %}
+          <span class="small muted">当前选择：版本
+            <b>{% if selected.seq %}#{{ selected.seq }}{% else %}{{ selected.id }}{% endif %}</b>
+            （{{ selected.canvas_width }}×{{ selected.canvas_height }}）</span>
+        {% else %}
+          <span class="small muted">请在上方点“选此版本”选择画幅。</span>
+        {% endif %}
+      </div>
+    </form>
+  </section>
+</div>
+
+<div class="col">
+  <section class="card">
+    <h2>调查会做什么</h2>
+    <ul class="rules">
+      <li>按 128×128 分块，为每块保存像元状态与连通摘要（本地分量、边界端口、权重）。</li>
+      <li>查询给定已知水面像元，返回<b>下限</b>（只经已知水面可达）与<b>上限</b>（未知也算水）。</li>
+      <li>查询只读摘要；结果与全图 BFS 重算一致。</li>
+      <li>后续可用 CSV 按列、行改判水陆，只重算改动块，并与摘要一并原子生效。</li>
+    </ul>
+  </section>
+</div>
+{% endblock %}

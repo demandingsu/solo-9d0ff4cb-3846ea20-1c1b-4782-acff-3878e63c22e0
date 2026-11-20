@@ -58,6 +58,56 @@ CREATE TABLE IF NOT EXISTS published_versions (
     png_bytes           INTEGER NOT NULL,
     csv_bytes           INTEGER NOT NULL
 );
+
+-- A water-connectivity survey: one published version + one black/white mask.
+-- Re-uploading the same mask for the same version reuses the stored summary.
+CREATE TABLE IF NOT EXISTS analysis_runs (
+    id              TEXT    PRIMARY KEY,
+    version_id      TEXT    NOT NULL,
+    created_at      TEXT    NOT NULL,
+    canvas_width    INTEGER NOT NULL,
+    canvas_height   INTEGER NOT NULL,
+    block_size      INTEGER NOT NULL,
+    mask_sha256     TEXT    NOT NULL,
+    water_pixels    INTEGER NOT NULL,
+    land_pixels     INTEGER NOT NULL,
+    unknown_pixels  INTEGER NOT NULL,
+    last_patch_id   TEXT,
+    UNIQUE (version_id, mask_sha256)
+);
+
+-- One connectivity summary per 128x128 block.
+CREATE TABLE IF NOT EXISTS analysis_blocks (
+    run_id     TEXT    NOT NULL,
+    bx         INTEGER NOT NULL,
+    by         INTEGER NOT NULL,
+    width      INTEGER NOT NULL,
+    height     INTEGER NOT NULL,
+    pixels     BLOB    NOT NULL,
+    wu_labels  BLOB    NOT NULL,
+    w_labels   BLOB    NOT NULL,
+    wu_weights TEXT    NOT NULL,
+    w_weights  TEXT    NOT NULL,
+    wu_ports   TEXT    NOT NULL,
+    w_ports    TEXT    NOT NULL,
+    PRIMARY KEY (run_id, bx, by)
+);
+
+-- Applied field re-surveys (col,row,state CSV), including their content hash
+-- so the same file cannot be applied twice.
+CREATE TABLE IF NOT EXISTS analysis_patches (
+    id             TEXT    PRIMARY KEY,
+    run_id         TEXT    NOT NULL,
+    created_at     TEXT    NOT NULL,
+    csv_sha256     TEXT    NOT NULL,
+    row_count      INTEGER NOT NULL,
+    changed_pixels INTEGER NOT NULL,
+    changed_blocks TEXT    NOT NULL,
+    UNIQUE (run_id, csv_sha256)
+);
+
+CREATE INDEX IF NOT EXISTS ix_analysis_patches_run
+    ON analysis_patches(run_id, created_at);
 """
 
 DEFAULT_SETTINGS: dict[str, str] = {

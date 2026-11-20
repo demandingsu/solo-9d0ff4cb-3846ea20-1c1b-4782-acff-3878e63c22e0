@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import io
+import os
+import tempfile
 import warnings
 from pathlib import Path
 from typing import Iterable
@@ -11,7 +13,11 @@ import pytest
 from PIL import Image
 from starlette.testclient import TestClient
 
-from app.main import create_app
+# `app.main` builds a module-level app on import; point it at a throwaway
+# directory so running the tests never mutates the repository's data/ folder.
+os.environ.setdefault("MOSAIC_DATA_DIR", tempfile.mkdtemp(prefix="mosaic-test-"))
+
+from app.main import create_app  # noqa: E402
 
 warnings.filterwarnings("ignore", message="Using `httpx` with `starlette.testclient`")
 

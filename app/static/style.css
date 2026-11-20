@@ -179,3 +179,18 @@ details[open] summary { margin-bottom: 8px; }
 .rules { margin: 0; padding-left: 18px; color: var(--muted); font-size: 13px; }
 .rules li { margin-bottom: 5px; }
 .rules code { color: var(--text); }
+
+.analysis-form { margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--line); }
+h3.subhead { font-size: 13px; color: var(--muted); font-weight: 500; margin: 16px 0 6px; }
+
+a.pick {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 12.5px;
+}
+a.pick:hover { border-color: var(--accent); }

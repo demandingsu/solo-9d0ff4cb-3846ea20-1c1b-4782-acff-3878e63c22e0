@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import db
+from . import analysis, db
 from .mosaic import (
     MAX_TILE_ID_LEN,
     TileRecord,
@@ -31,6 +31,12 @@ from .mosaic import (
     validate_canvas,
     validate_int,
     validate_upload,
+)
+from .water import (
+    WaterAnalysisError,
+    build_state_grid,
+    mask_sha256,
+    parse_reclassification_csv,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -290,6 +296,26 @@ def create_app(data_dir: str | os.PathLike[str] | None = None) -> FastAPI:
                 "SELECT * FROM published_versions ORDER BY seq DESC LIMIT 10"
             ).fetchall()
         ]
+        analysis_runs = []
+        for run in analysis.list_runs(conn, limit=10):
+            version = conn.execute(
+                "SELECT seq FROM published_versions WHERE id = ?",
+                (run.version_id,),
+            ).fetchone()
+            analysis_runs.append(
+                {
+                    "id": run.id,
+                    "version_id": run.version_id,
+                    "version_seq": None if version is None else version["seq"],
+                    "created_at": run.created_at,
+                    "width": run.canvas_width,
+                    "height": run.canvas_height,
+                    "water": run.water_pixels,
+                    "land": run.land_pixels,
+                    "unknown": run.unknown_pixels,
+                    "patches": analysis.patch_count(conn, run.id),
+                }
+            )
         return {
             "request": request,
             "state": state,
@@ -301,6 +327,7 @@ def create_app(data_dir: str | os.PathLike[str] | None = None) -> FastAPI:
             "tiles": tiles,
             "published": published_version,
             "recent_versions": recent,
+            "analysis_runs": analysis_runs,
             "fingerprint": fingerprint,
             "limits": {"max_tile_id_len": MAX_TILE_ID_LEN},
             "flash": request.query_params.get("msg", ""),
@@ -744,6 +771,236 @@ def create_app(data_dir: str | os.PathLike[str] | None = None) -> FastAPI:
                 "FROM published_versions ORDER BY seq DESC"
             ).fetchall()
         return JSONResponse([dict(row) for row in rows])
+
+    # ------------------------------------------------------------------ #
+    # Water analysis (published version + survey mask + field patches)
+    # ------------------------------------------------------------------ #
+
+    def _published_file(version_id: str) -> tuple[Any, Path]:
+        with db_lock as conn:
+            row = conn.execute(
+                "SELECT * FROM published_versions WHERE id = ? OR seq = ?",
+                (version_id, int(version_id) if version_id.isdigit() else -1),
+            ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="未找到该已发布画幅。")
+        path = (runtime.versions_dir / row["png_rel"]).resolve()
+        if (
+            not path.is_file()
+            or path.parent.parent != runtime.versions_dir.resolve()
+            or path.parent.name.startswith(STAGING_PREFIX)
+        ):
+            raise HTTPException(status_code=503, detail="该版本文件不完整。")
+        return row, path
+
+    def _run_facts(conn, run) -> dict[str, Any]:
+        version = conn.execute(
+            "SELECT seq FROM published_versions WHERE id = ?", (run.version_id,)
+        ).fetchone()
+        patches = analysis.list_patches(conn, run.id, limit=10)
+        return {
+            "run": run,
+            "fingerprint": analysis.run_fingerprint(conn, run),
+            "version_seq": None if version is None else version["seq"],
+            "patches": patches,
+            "patch_total": analysis.patch_count(conn, run.id),
+        }
+
+    def _render_run(
+        request: Request,
+        run_id: str,
+        status_code: int = 200,
+        extra: dict[str, Any] | None = None,
+        error: str = "",
+    ):
+        with db_lock as conn:
+            run = analysis.get_run(conn, run_id)
+            if run is None:
+                raise HTTPException(status_code=404, detail="未找到该水陆调查。")
+            context = build_context(request, conn)
+            facts = _run_facts(conn, run)
+        context.update(facts)
+        context.update(extra or {})
+        context["request"] = request
+        context["run_error"] = error
+        return templates.TemplateResponse(
+            request, "analysis.html", context, status_code=status_code
+        )
+
+    @app.get("/analysis")
+    def analysis_start() -> RedirectResponse:
+        with db_lock as conn:
+            published = conn.execute(
+                "SELECT id FROM published_versions ORDER BY seq DESC LIMIT 1"
+            ).fetchone()
+        if published is None:
+            return redirect(err="请先发布至少一个画幅，再建立水陆调查。")
+        return RedirectResponse(
+            f"/analysis/new?version={published['id']}", status_code=303
+        )
+
+    def _new_page(request: Request, error: str = "", version: str = ""):
+        with db_lock as conn:
+            context = build_context(request, conn)
+            if version:
+                row = conn.execute(
+                    "SELECT * FROM published_versions WHERE id = ? OR seq = ?",
+                    (version, int(version) if version.isdigit() else -1),
+                ).fetchone()
+                context["selected"] = None if row is None else dict(row)
+        context["run_error"] = error
+        return templates.TemplateResponse(
+            request, "analysis_new.html", context, status_code=400 if error else 200
+        )
+
+    @app.get("/analysis/new", response_class=HTMLResponse)
+    def analysis_new(request: Request, version: str = "") -> HTMLResponse:
+        return _new_page(request, version=version)
+
+    @app.post("/analysis")
+    async def create_analysis(
+        version_id: str = Form(...),
+        mask: UploadFile = File(...),
+    ) -> RedirectResponse:
+        version_id = (version_id or "").strip()
+        if not version_id:
+            return _redirect_new(err="请先选择一个已发布画幅。")
+        mask_bytes = await mask.read(MAX_UPLOAD_BYTES + 1)
+        if not mask_bytes or len(mask_bytes) > MAX_UPLOAD_BYTES:
+            return _redirect_new(err="水陆掩膜不能为空，且不能超过 64 MB。")
+        try:
+            row, png_path = _published_file(version_id)
+            mosaic_png = png_path.read_bytes()
+        except HTTPException as exc:
+            return _redirect_new(err=str(exc.detail), version=version_id)
+        digest = mask_sha256(mask_bytes)
+        try:
+            grid = build_state_grid(
+                mask_bytes, mosaic_png, row["canvas_width"], row["canvas_height"]
+            )
+            # Summaries are computed outside the lock; the insert is atomic
+            # and reuses an identical concurrent run.
+            summaries = analysis.summarize_grid(
+                grid, row["canvas_width"], row["canvas_height"]
+            )
+            with db_lock as conn:
+                run = analysis.insert_run(
+                    conn,
+                    version_id=row["id"],
+                    grid=grid,
+                    canvas_width=row["canvas_width"],
+                    canvas_height=row["canvas_height"],
+                    mask_sha256=digest,
+                    summaries=summaries,
+                )
+        except WaterAnalysisError as exc:
+            return _redirect_new(err=str(exc), version=row["id"])
+        return RedirectResponse(
+            f"/analysis/{run.id}?msg=" + quote("水陆调查已建立。"),
+            status_code=303,
+        )
+
+    def _redirect_new(err: str, version: str = "") -> RedirectResponse:
+        params = ["err=" + quote(err)]
+        if version:
+            params.insert(0, "version=" + quote(version))
+        return RedirectResponse(
+            "/analysis/new?" + "&".join(params), status_code=303
+        )
+
+    @app.get("/analysis/{run_id}", response_class=HTMLResponse)
+    def analysis_page(request: Request, run_id: str) -> HTMLResponse:
+        return _render_run(request, run_id)
+
+    @app.get("/analysis/{run_id}/query", response_class=HTMLResponse)
+    def analysis_query(
+        request: Request,
+        run_id: str,
+        col: str = "",
+        row: str = "",
+    ) -> HTMLResponse:
+        """Compute the bounds.  Only reads summaries (plus the seed block)."""
+        with db_lock as conn:
+            run = analysis.get_run(conn, run_id)
+            if run is None:
+                raise HTTPException(status_code=404, detail="未找到该水陆调查。")
+        if not col.strip() or not row.strip():
+            return _render_run(request, run_id)
+        context: dict[str, Any] = {}
+        try:
+            column = int(col.strip())
+            row_index = int(row.strip())
+            with db_lock as conn:
+                context["query_result"] = analysis.run_bounds(
+                    conn, run, column, row_index
+                )
+            context["query"] = {"col": column, "row": row_index}
+        except ValueError as exc:
+            message = (
+                str(exc)
+                if isinstance(exc, WaterAnalysisError)
+                else "列和行必须是从 0 开始的整数。"
+            )
+            context["query_error"] = message
+            context["query"] = {"col": col, "row": row}
+        return _render_run(request, run_id, extra=context)
+
+    @app.post("/analysis/{run_id}/patch")
+    async def analysis_patch(
+        request: Request,
+        run_id: str,
+        csv_file: UploadFile = File(...),
+    ) -> RedirectResponse:
+        raw = await csv_file.read(MAX_UPLOAD_BYTES + 1)
+        try:
+            with db_lock as conn:
+                run = analysis.get_run(conn, run_id)
+                if run is None:
+                    raise HTTPException(status_code=404, detail="未找到该水陆调查。")
+                changes = parse_reclassification_csv(
+                    raw, run.canvas_width, run.canvas_height
+                )
+                plan = analysis.plan_patch(conn, run, changes)
+            computation = analysis.compute_patch(
+                plan, changes, run.canvas_width, run.canvas_height
+            )
+            if computation.changed_pixels == 0:
+                return _redirect_run(
+                    run_id,
+                    msg="补测 CSV 与当前调查完全一致，没有需要更新的区块。",
+                )
+            with db_lock as conn:
+                outcome = analysis.commit_patch(
+                    conn,
+                    run,
+                    plan,
+                    computation,
+                    csv_sha256=mask_sha256(raw),
+                    row_count=len(changes),
+                )
+        except HTTPException:
+            raise
+        except analysis.AnalysisConflict as exc:
+            return _redirect_run(run_id, err=str(exc))
+        except WaterAnalysisError as exc:
+            return _redirect_run(run_id, err=str(exc))
+        return _redirect_run(
+            run_id,
+            msg=(
+                f"补测已生效：{outcome.row_count} 行改判，"
+                f"{outcome.changed_pixels} 个像元变化，"
+                f"重算 {len(outcome.changed_blocks)} 个区块。"
+            ),
+        )
+
+    def _redirect_run(run_id: str, msg: str | None = None, err: str | None = None):
+        params = []
+        if msg:
+            params.append("msg=" + quote(msg))
+        if err:
+            params.append("err=" + quote(err))
+        suffix = "?" + "&".join(params) if params else ""
+        return RedirectResponse(f"/analysis/{run_id}{suffix}", status_code=303)
 
     return app
 

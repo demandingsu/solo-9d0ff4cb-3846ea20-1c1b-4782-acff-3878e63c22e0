@@ -1,18 +1,5 @@
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>航拍无云画幅合成</title>
-  <link rel="stylesheet" href="/static/style.css">
-</head>
-<body>
-  <header class="top">
-    <h1>航拍无云画幅合成</h1>
-    <span class="sub">按瓦片号去重取最新修订 · 云遮蔽像素透明 · 逐像素来源可追溯</span>
-  </header>
-
-  <main>
+{% extends "base.html" %}
+{% block content %}
     <div class="col">
       {% if flash %}<div class="flash ok">{{ flash }}</div>{% endif %}
       {% if flash_error %}<div class="flash err">{{ flash_error }}</div>{% endif %}
@@ -189,12 +176,40 @@
             <a href="/download/{{ published.id }}/sources.csv">下载 sources.csv</a>
             <a href="/download/{{ published.id }}/manifest.json">查看清单 manifest.json</a>
           </div>
+          <form method="post" action="/analysis" enctype="multipart/form-data" class="analysis-form">
+            <input type="hidden" name="version_id" value="{{ published.id }}">
+            <label class="field"><span>水陆调查：为该已发布画幅上传同尺寸黑白 PNG（黑色=陆地，白色=水面；透明处记为未知）</span>
+              <input type="file" name="mask" accept="image/png" required>
+            </label>
+            <div class="actions">
+              <button type="submit">建立水陆调查</button>
+              <span class="small muted">按 128×128 区块维护连通摘要，可查询水面面积上下限并应用 CSV 补测。</span>
+            </div>
+          </form>
           <p class="small muted" style="margin:10px 0 0">
             指纹 <span class="mono wrap-any">{{ published.fingerprint }}</span><br>
             下载时校验 SHA-256，文件不完整或不一致会返回 503，绝不会给出半成品。
           </p>
         {% else %}
           <p class="muted small">尚未发布任何版本。当前预览满足要求后点击“发布当前预览”。</p>
+        {% endif %}
+
+        {% if analysis_runs %}
+        <h3 class="subhead">水陆调查</h3>
+        <table>
+          <thead><tr><th>画幅</th><th class="num">尺寸</th><th class="num">水/陆/未知</th><th class="num">补测</th><th></th></tr></thead>
+          <tbody>
+          {% for a in analysis_runs %}
+            <tr>
+              <td>{% if a.version_seq is not none %}#{{ a.version_seq }}{% else %}<span class="mono">{{ a.version_id[:8] }}</span>{% endif %}</td>
+              <td class="num">{{ a.width }}×{{ a.height }}</td>
+              <td class="num">{{ a.water }} / {{ a.land }} / {{ a.unknown }}</td>
+              <td class="num">{{ a.patches }}</td>
+              <td class="small"><a href="/analysis/{{ a.id }}">打开</a></td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
         {% endif %}
 
         {% if recent_versions %}
@@ -221,6 +236,4 @@
         {% endif %}
       </section>
     </div>
-  </main>
-</body>
-</html>
+{% endblock %}
